@@ -17,7 +17,7 @@ Add to your microservice's `package.json`:
 ```json
 {
   "dependencies": {
-    "@lucent/infrastructure": "^1.0.0",
+    "lucent-infrastructure": "^1.0.0",
     "@nestjs/core": "^10.0.0",
     "@nestjs/platform-fastify": "^10.0.0",
     "@nestjs/common": "^10.0.0"
@@ -27,7 +27,7 @@ Add to your microservice's `package.json`:
 
 Install in your microservice:
 ```bash
-npm install @lucent/infrastructure
+npm install lucent-infrastructure
 ```
 
 ### 2. Environment Setup
@@ -45,6 +45,7 @@ services:
       - KAFKA_BROKERS=localhost:9092
       - CLICKHOUSE_HOST=localhost:8123
       - KURRENTDB_CONNECTION=esdb://localhost:2113
+      - REDIS_URL=redis://localhost:6379
     networks:
       - lucent-network
 
@@ -55,105 +56,556 @@ networks:
 
 ## Service Architecture Requirements
 
-### 1. Service Base Classes (MANDATORY)
+### 1. Functional Core + Imperative Shell Pattern (MANDATORY)
 
-All services **MUST** extend the appropriate base class:
+All services **MUST** separate pure functions (functional core) from I/O operations (imperative shell):
 
+#### Pure Functions (Functional Core)
 ```typescript
 import { 
-  CryptoTradingServiceBase, 
-  UserServiceBase, 
+  EnhancedFunctionContext,
+  EventHandler,
+  ShardBy,
+  ResourceRequirements
+} from 'lucent-infrastructure';
+
+/**
+ * Pure function for yield farming calculations
+ */
+@EventHandler('YieldOpportunityDetected')
+@ShardBy('protocol')
+@ResourceRequirements({ cpu: 'medium', memory: '256MB', priority: 'high', timeout: 15000 })
+export function calculateYieldStrategy(
+  context: EnhancedFunctionContext,
+  data: YieldOpportunityData
+): YieldStrategy {
+  
+  context.logger.debug('Calculating yield strategy', {
+    protocol: data.protocol,
+    apy: data.apy,
+    tvl: data.tvl
+  });
+
+  // Pure business logic - no side effects
+  const riskAdjustedApy = data.apy * (1 - (data.riskScore / 10));
+  const optimalAllocation = Math.min(riskAdjustedApy / 20, 0.5);
+  
+  const strategy = {
+    protocol: data.protocol,
+    allocation: optimalAllocation,
+    confidence: calculateConfidence(data.historicalPerformance),
+    exitStrategy: optimalAllocation > 0.3 ? 'gradual' : 'immediate'
+  };
+
+  // Context provides observability without side effects
+  context.addMetadata('yield.risk_adjustment', data.riskScore / 10);
+  context.addMetadata('yield.optimal_allocation', optimalAllocation);
+  
+  // Emit high-confidence opportunities
+  if (strategy.confidence > 0.9) {
+    context.emit('HighConfidenceYieldDetected', {
+      protocol: data.protocol,
+      confidence: strategy.confidence,
+      allocation: strategy.allocation
+    });
+  }
+
+  return strategy;
+}
+
+/**
+ * Pure function for trade execution validation
+ */
+@EventHandler('TradeExecutionRequested')
+@ShardBy('risk_level')
+@ResourceRequirements({ cpu: 'low', memory: '128MB', priority: 'critical', timeout: 5000 })
+export function validateTradeExecution(
+  context: EnhancedFunctionContext,
+  data: TradeExecutionData
+): TradeValidationResult {
+  
+  // Pure validation logic
+  const validationResult = {
+    isValid: true,
+    violations: [],
+    riskScore: 0
+  };
+
+  // Validate amount
+  if (data.amountUsd < 10) {
+    validationResult.isValid = false;
+    validationResult.violations.push({
+      rule: 'minimum_amount',
+      message: 'Trade amount below $10 minimum'
+    });
+  }
+
+  // Validate risk level
+  if (data.amountUsd > data.maxPositionSize) {
+    validationResult.isValid = false;
+    validationResult.violations.push({
+      rule: 'position_limit',
+      message: 'Trade exceeds maximum position size'
+    });
+  }
+
+  context.addMetadata('validation.amount_usd', data.amountUsd);
+  context.addMetadata('validation.violations', validationResult.violations.length);
+  
+  return validationResult;
+}
+```
+
+#### Function Manager (Imperative Shell)
+```typescript
+import { 
   LucentServiceBase,
   BusinessContextBuilder,
-  InfrastructureFactory 
-} from '@lucent/infrastructure';
+  InfrastructureFactory
+} from 'lucent-infrastructure';
 
-// Trading services
-class YieldFarmingService extends CryptoTradingServiceBase {
+/**
+ * Function Manager handles I/O and coordinates pure functions
+ */
+class YieldFarmingFunctionManager extends LucentServiceBase {
   constructor() {
     const infrastructure = await InfrastructureFactory.createDefault();
-    super(infrastructure, 'yield-farming');
+    super(infrastructure, 'yield-farming-function-manager');
   }
-}
 
-// User management services  
-class UserService extends UserServiceBase {
-  constructor() {
-    const infrastructure = await InfrastructureFactory.createDefault();
-    super(infrastructure, 'user-management');
+  /**
+   * Process yield opportunity events using pure functions
+   */
+  async processYieldOpportunity(event: DomainEvent<YieldOpportunityData>): Promise<void> {
+    return this.handleDomainEvent(event, async (event, context) => {
+      
+      // 1. Execute pure function for yield calculation
+      const functionContext = this.createEnhancedContext(context);
+      const yieldStrategy = calculateYieldStrategy(functionContext, event.data);
+      
+      // 2. Handle I/O - store result in EventStore
+      await this.publishDomainEvent(
+        'YieldStrategyCalculated',
+        `yield-strategy-${event.data.protocol}-${Date.now()}`,
+        yieldStrategy,
+        context.businessContext,
+        context
+      );
+      
+      // 3. Handle I/O - update Redis projection
+      await this.updateYieldProjection(event.data.userId, yieldStrategy);
+      
+      // 4. Handle I/O - notify other services if high confidence
+      if (yieldStrategy.confidence > 0.9) {
+        await this.sendCommand(
+          'portfolio-service',
+          'ConsiderYieldStrategy',
+          yieldStrategy,
+          context.businessContext
+        );
+      }
+    });
   }
-}
 
-// Other services
-class NotificationService extends LucentServiceBase {
-  constructor() {
-    const infrastructure = await InfrastructureFactory.createDefault();
-    super(infrastructure, 'notifications');
+  private async updateYieldProjection(userId: string, strategy: YieldStrategy): Promise<void> {
+    // I/O: Update user's yield opportunities in Redis
+    await this.infrastructure.cacheStore.hset(
+      `user-yield:${userId}`,
+      strategy.protocol,
+      JSON.stringify({
+        allocation: strategy.allocation,
+        confidence: strategy.confidence,
+        calculatedAt: Date.now()
+      })
+    );
+
+    // Update global yield rankings
+    await this.infrastructure.cacheStore.zadd(
+      'yield-rankings',
+      strategy.confidence * strategy.allocation,
+      `${userId}:${strategy.protocol}`
+    );
   }
 }
 ```
 
-### 2. Business Operations (ENFORCED PATTERN)
+### 2. Function Registration and Discovery (ENFORCED PATTERN)
 
-**ALL business operations MUST use the enforced pattern:**
+**ALL pure functions MUST use decorators for automatic discovery:**
 
+#### Pure Function Declaration
 ```typescript
-class TradingService extends CryptoTradingServiceBase {
-  async executeSwap(request: SwapRequest): Promise<SwapResult> {
-    // REQUIRED: Use business context builder
+/**
+ * MANDATORY: All business functions use decorators
+ */
+@EventHandler('SwapRequested')
+@ShardBy('trading_pair')
+@ResourceRequirements({ cpu: 'high', memory: '512MB', priority: 'critical', timeout: 30000 })
+export function executeSwapCalculation(
+  context: EnhancedFunctionContext,
+  data: SwapRequestData
+): SwapCalculationResult {
+  
+  context.logger.info('Executing swap calculation', {
+    trading_pair: data.pair,
+    amount_usd: data.amountUsd,
+    exchange: data.exchange
+  });
+
+  // Pure business logic - no side effects
+  const slippageEstimate = calculateSlippage(data.amountUsd, data.liquidity);
+  const feeEstimate = calculateFees(data.amountUsd, data.exchange);
+  const priceImpact = calculatePriceImpact(data.amountUsd, data.orderBook);
+  
+  const swapCalculation = {
+    expectedOutput: data.amountUsd / data.price,
+    slippage: slippageEstimate,
+    fees: feeEstimate,
+    priceImpact: priceImpact,
+    profitability: (1 - slippageEstimate - feeEstimate - priceImpact),
+    executionRecommendation: (slippageEstimate + feeEstimate) < 0.005 ? 'execute' : 'wait'
+  };
+
+  context.addMetadata('swap.slippage_estimate', slippageEstimate);
+  context.addMetadata('swap.fee_estimate', feeEstimate);
+  context.addMetadata('swap.price_impact', priceImpact);
+  
+  // Emit execution recommendation
+  context.emit('SwapCalculationCompleted', {
+    tradeId: data.tradeId,
+    recommendation: swapCalculation.executionRecommendation,
+    profitability: swapCalculation.profitability
+  });
+
+  return swapCalculation;
+}
+```
+
+#### Service Classes (Imperative Shell)
+```typescript
+/**
+ * Service classes handle I/O and delegate to Function Manager
+ */
+class PortfolioService extends CryptoTradingServiceBase {
+  constructor() {
+    const infrastructure = await InfrastructureFactory.createDefault();
+    super(infrastructure, 'portfolio-service');
+  }
+
+  /**
+   * I/O Shell: Handle HTTP requests and coordinate with Function Manager
+   */
+  async executePortfolioUpdate(request: PortfolioUpdateRequest): Promise<PortfolioUpdateResult> {
     const businessContext = BusinessContextBuilder
       .forCryptoTrading()
-      .withAggregate('Trade', `trade-${request.tradeId}`)
+      .withAggregate('Portfolio', request.userId)
       .withUser(request.userId)
-      .withTradingPair(request.pair)
-      .withExchange(request.exchange)
-      .withAmount(request.amountUsd)
-      .withWorkflow(`swap-workflow-${request.tradeId}`)
-      .withPriority(request.amountUsd > 100000 ? 'high' : 'normal')
       .build();
 
-    // ENFORCED: All operations go through executeBusinessOperation
-    return this.executeBusinessOperation('execute_swap', businessContext, async (context) => {
-      // Your business logic here
-      const swapResult = await this.performSwap(request);
+    return this.executeBusinessOperation('portfolio_update', businessContext, async (context) => {
       
-      // ENFORCED: Publish domain events through framework
-      await this.publishDomainEvent(
-        'SwapExecuted',
-        `trade-${request.tradeId}`,
-        swapResult,
-        businessContext,
-        context
+      // 1. I/O: Read current state from EventStore
+      const portfolioEvents = await this.infrastructure.eventStore.read(`portfolio-${request.userId}`);
+      const riskProfile = await this.getUserRiskProfile(request.userId);
+      
+      // 2. I/O: Send calculation request to Function Manager
+      const calculationRequest = await this.sendCommand<any, PortfolioCalculation>(
+        'function-manager',
+        'CalculatePortfolioUpdate',
+        {
+          eventType: 'PortfolioUpdateRequested',
+          data: {
+            currentEvents: portfolioEvents,
+            newTrade: request.tradeData,
+            riskProfile: riskProfile,
+            timestamp: Date.now()
+          }
+        },
+        context.businessContext
       );
+      
+      // 3. I/O: Handle Function Manager response
+      if (calculationRequest.success) {
+        
+        // Store calculation result in EventStore
+        await this.publishDomainEvent(
+          'PortfolioCalculated',
+          `portfolio-calc-${request.userId}`,
+          calculationRequest.result,
+          context.businessContext,
+          context
+        );
+        
+        // Update Redis projection
+        await this.updatePortfolioProjection(request.userId, calculationRequest.result);
+        
+        // Send notifications if needed
+        if (calculationRequest.result.riskLevelChanged) {
+          await this.sendCommand(
+            'notification-service',
+            'SendRiskAlert',
+            { userId: request.userId, newRiskLevel: calculationRequest.result.newRiskLevel },
+            context.businessContext
+          );
+        }
+      }
+      
+      return {
+        success: calculationRequest.success,
+        portfolio: calculationRequest.result,
+        timestamp: Date.now()
+      };
+    });
+  }
 
-      return swapResult;
+  /**
+   * I/O: Update Redis projection from calculation result
+   */
+  private async updatePortfolioProjection(userId: string, portfolio: any): Promise<void> {
+    const pipeline = this.infrastructure.cacheStore.pipeline();
+    
+    pipeline
+      .hset(`portfolio:${userId}:positions`, 'data', JSON.stringify(portfolio.positions))
+      .hset(`portfolio:${userId}:metadata`, 'totalValue', portfolio.totalValue.toString())
+      .hset(`portfolio:${userId}:metadata`, 'lastUpdated', Date.now().toString())
+      .zadd('portfolio-rankings', portfolio.totalValue, userId);
+
+    await pipeline.exec();
+  }
+}
+
+### 3. Compile-Time Function Registry (AUTO-GENERATED)
+
+The build process **automatically generates** a typed function registry from decorated functions:
+
+#### Generated Registry Example
+```typescript
+// AUTO-GENERATED - DO NOT EDIT
+export const TYPED_FUNCTION_REGISTRY = {
+  calculateYieldStrategy: {
+    name: 'calculateYieldStrategy',
+    eventTypes: ['YieldOpportunityDetected'],
+    shardingStrategy: { type: 'protocol', value: null },
+    resourceRequirements: { cpu: 'medium', memory: '256MB', priority: 'high', timeout: 15000 },
+    execute: calculateYieldStrategy // TypeScript preserves exact signature
+  },
+  executeSwapCalculation: {
+    name: 'executeSwapCalculation', 
+    eventTypes: ['SwapRequested'],
+    shardingStrategy: { type: 'trading_pair', value: null },
+    resourceRequirements: { cpu: 'high', memory: '512MB', priority: 'critical', timeout: 30000 },
+    execute: executeSwapCalculation
+  },
+  validateTradeExecution: {
+    name: 'validateTradeExecution',
+    eventTypes: ['TradeExecutionRequested'],
+    shardingStrategy: { type: 'risk_level', value: null },
+    resourceRequirements: { cpu: 'low', memory: '128MB', priority: 'critical', timeout: 5000 },
+    execute: validateTradeExecution
+  }
+} as const;
+
+// Type mapping for compile-time validation
+export type EventToFunctionMapping = {
+  'YieldOpportunityDetected': {
+    input: YieldOpportunityData;
+    output: YieldStrategy;
+    functions: ['calculateYieldStrategy'];
+  };
+  'SwapRequested': {
+    input: SwapRequestData;
+    output: SwapCalculationResult;
+    functions: ['executeSwapCalculation'];
+  };
+  'TradeExecutionRequested': {
+    input: TradeExecutionData;
+    output: TradeValidationResult;
+    functions: ['validateTradeExecution'];
+  };
+};
+```
+
+#### Build Process Integration
+```json
+{
+  "scripts": {
+    "prebuild": "generate-function-registry",
+    "build": "tsc",
+    "generate-function-registry": "ts-node build-tools/generate-registry.ts"
+  }
+}
+```
+
+### 4. Service to Function Manager Connection
+
+#### Standard Flow: Service → Function Manager → Pure Function
+
+**ENFORCED PATTERN: All computation goes through Function Manager**
+
+```typescript
+/**
+ * Services handle I/O and delegate computation to Function Manager
+ */
+class PortfolioService extends CryptoTradingServiceBase {
+  async handleTradeExecuted(event: TradeExecutedEvent): Promise<void> {
+    return this.handleDomainEvent(event, async (event, context) => {
+      
+      // 1. I/O: Read current state from EventStore
+      const portfolioEvents = await this.infrastructure.eventStore.read(`portfolio-${event.data.userId}`);
+      const riskProfile = await this.getUserRiskProfile(event.data.userId);
+      
+      // 2. I/O: Send computation request to Function Manager
+      const calculationResult = await this.sendCommand<any, PortfolioCalculation>(
+        'function-manager',
+        'ExecuteFunction',
+        {
+          functionType: 'calculatePortfolioUpdate',
+          eventType: 'PortfolioUpdateRequested', 
+          data: {
+            currentEvents: portfolioEvents,
+            newTrade: event.data,
+            riskProfile: riskProfile,
+            timestamp: Date.now()
+          }
+        },
+        context.businessContext
+      );
+      
+      // 3. I/O: Handle calculation result
+      if (calculationResult.success) {
+        
+        // Store result in EventStore
+        await this.publishDomainEvent(
+          'PortfolioUpdated',
+          `portfolio-${event.data.userId}`,
+          calculationResult.portfolio,
+          context.businessContext,
+          context
+        );
+        
+        // Update Redis projection
+        await this.updatePortfolioProjection(event.data.userId, calculationResult.portfolio);
+        
+        // Send notifications if needed
+        if (calculationResult.portfolio.riskLevelChanged) {
+          await this.sendCommand(
+            'notification-service',
+            'SendRiskAlert',
+            calculationResult.riskAlert,
+            context.businessContext
+          );
+        }
+      }
     });
   }
 }
+
+/**
+ * Generic Function Manager receives requests and orchestrates pure functions
+ */
+class GenericFunctionManager extends LucentServiceBase {
+  constructor(
+    private shardId: string,
+    private availableShards: string[]
+  ) {
+    const infrastructure = await InfrastructureFactory.createDefault();
+    super(infrastructure, `function-manager-${shardId}`);
+  }
+
+  /**
+   * Handle function execution requests from services
+   */
+  async handleExecuteFunction(request: FunctionExecutionRequest): Promise<void> {
+    return this.handleDomainEvent(request, async (request, context) => {
+      
+      // 1. Route to optimal shard based on function decorators
+      const targetShard = await this.determineTargetShard(request.data);
+      
+      if (targetShard !== this.shardId) {
+        return this.forwardToShard(targetShard, request);
+      }
+
+      // 2. Get functions from registry that can handle this event type
+      const availableFunctions = this.getFunctionsForEvent(request.data.eventType);
+      
+      // 3. Select optimal function by load balancing
+      const selectedFunction = await this.selectOptimalFunction(availableFunctions);
+      
+      // 4. Execute pure function with enhanced context
+      const functionContext = this.createEnhancedFunctionContext(context);
+      const result = selectedFunction.execute(functionContext, request.data.data);
+      
+      // 5. Handle function result - publish events and update projections
+      await this.handleFunctionResult(selectedFunction.name, result, request.data.eventType, context);
+      
+      // 6. Send response back to requesting service
+      await this.sendResponse(request.requestId, {
+        success: true,
+        result: result,
+        functionName: selectedFunction.name,
+        shardId: this.shardId
+      });
+    });
+  }
+
+  /**
+   * Handle function results - EventStore + Redis + Commands
+   */
+  private async handleFunctionResult(
+    functionName: string,
+    result: any,
+    originalEventType: string,
+    context: EventProcessingContext
+  ): Promise<void> {
+    
+    if (!result) return;
+
+    // Store function result as domain event
+    await this.publishDomainEvent(
+      `${functionName}Completed`,
+      `function-result-${context.correlationId}`,
+      result,
+      context.businessContext,
+      context
+    );
+
+    // Update Redis projections based on function result
+    await this.updateProjectionsFromResult(result, context);
+    
+    // Send commands to other services if needed
+    await this.processResultCommands(result, context);
+  }
+}
 ```
 
-### 3. Domain Event Publishing (MANDATORY PATTERN)
+### 5. Complete Event Flow Architecture
 
-```typescript
-// WRONG: Never publish events directly
-await infrastructure.eventStore.append(streamId, [event]); // ❌ NO BUSINESS CONTEXT
-
-// CORRECT: Always use framework methods
-await this.publishDomainEvent(
-  'YieldOpportunityDetected',      // Event type
-  `yield-analysis-${analysisId}`,  // Stream ID  
-  {                                // Event data
-    protocol: 'aave',
-    apy: 8.5,
-    tvl: 1000000,
-    riskScore: 3.2
-  },
-  businessContext,                 // Business context (REQUIRED)
-  requestContext                   // Request context (optional)
-);
+```mermaid
+graph TD
+    A[HTTP Request] --> B[Service Class]
+    B --> C[Read EventStore/APIs]
+    C --> D[Send Command to Function Manager]
+    D --> E[Function Manager]
+    E --> F[Load Balance Functions]
+    F --> G[Select Optimal Function]
+    G --> H[Execute Pure Function]
+    H --> I[Function Result]
+    I --> J[Function Manager Handles I/O]
+    J --> K[Publish Domain Event]
+    J --> L[Update Redis Projection]
+    J --> M[Send Cross-Service Commands]
+    K --> N[Service Receives Event]
+    N --> O[Service Handles Response]
 ```
 
-### 4. Event Handling (ENFORCED PATTERN)
+**Key Benefits of Service → Function Manager → Pure Function Flow:**
+- ✅ **Services focus on I/O**: HTTP, databases, external APIs
+- ✅ **Function Manager optimizes computation**: Load balancing, shard routing
+- ✅ **Pure functions stay pure**: No I/O concerns, easily testable
+- ✅ **Dynamic load balancing**: Functions execute on optimal shards
+- ✅ **Consistent patterns**: All computation follows same flow
+
+### 6. Event Handling (ENFORCED PATTERN)
 
 ```typescript
 class PortfolioService extends CryptoTradingServiceBase {

@@ -128,14 +128,14 @@ class PortfolioFunctionManager extends LucentServiceBase {
       }
     }
 
-    // Batch update Redis
-    pipeline
-      .hset(`portfolio:${update.userId}:positions`, 'data', JSON.stringify(positions))
-      .hset(`portfolio:${update.userId}:metadata`, 'totalValue', update.valueChange.toString())
-      .hset(`portfolio:${update.userId}:metadata`, 'lastTradeId', update.lastTradeId)
-      .hset(`portfolio:${update.userId}:metadata`, 'lastUpdated', update.updatedAt.toString());
-
-    await pipeline.exec();
+    // Update cache with clean abstraction
+    await this.updatePortfolioProjection({
+      userId: update.userId,
+      positions: positions,
+      totalValue: update.valueChange,
+      lastTradeId: update.lastTradeId,
+      lastUpdated: update.updatedAt
+    });
   }
 }
 
@@ -178,17 +178,35 @@ const totalValue = await this.infrastructure.cacheStore.hget(`portfolio:${userId
 
 #### Sorted Sets for Rankings and Leaderboards
 ```typescript
-// Top traders by daily volume
-await this.infrastructure.cacheStore.zadd('daily-volume-leaders', dailyVolume, userId);
+// Clean domain-specific ranking operations
+await this.addToVolumeLeaderboard(userId, dailyVolume);
+await this.addToStrategyPerformance(strategyId, roi);
 
-// Top performing strategies
-await this.infrastructure.cacheStore.zadd('strategy-performance', roi, strategyId);
+// Get top performers with clean abstraction
+const topTraders = await this.getTopVolumeTraders(10);
+const userRank = await this.getUserVolumeRank(userId);
 
-// Get top 10 traders
-const topTraders = await this.infrastructure.cacheStore.zrevrange('daily-volume-leaders', 0, 9);
+/**
+ * Clean volume ranking operations
+ */
+private async addToVolumeLeaderboard(userId: string, volume: number): Promise<void> {
+  await this.infrastructure.cacheStore.zadd('daily-volume-leaders', volume, userId);
+}
 
-// Get user's rank
-const userRank = await this.infrastructure.cacheStore.zrevrank('daily-volume-leaders', userId);
+private async getTopVolumeTraders(limit: number): Promise<VolumeRanking[]> {
+  const topUsers = await this.infrastructure.cacheStore.zrevrange('daily-volume-leaders', 0, limit - 1);
+  
+  return topUsers.map((userId, index) => ({
+    userId,
+    rank: index + 1,
+    volume: 0 // Would get actual volume from zscore
+  }));
+}
+
+private async getUserVolumeRank(userId: string): Promise<number | null> {
+  const rank = await this.infrastructure.cacheStore.zrevrank('daily-volume-leaders', userId);
+  return rank !== null ? rank + 1 : null;
+}
 ```
 
 #### Sets for Unique Collections
@@ -317,18 +335,15 @@ class RiskService extends CryptoTradingServiceBase {
     // Update trade frequency (for risk scoring)
     pipeline.incr(`user-trade-count:${userId}:${this.getDateKey()}`);
     
-    // Update largest single trade
-    const currentLargest = await this.infrastructure.cacheStore.hget(`user-risk:${userId}`, 'largestTrade');
-    if (!currentLargest || trade.amountUsd > parseFloat(currentLargest)) {
-      pipeline.hset(`user-risk:${userId}`, 'largestTrade', trade.amountUsd.toString());
-    }
-
-    // Calculate and store risk score
+    // Update risk metrics with clean abstraction
     const riskScore = await this.calculateRiskScore(userId, trade);
-    pipeline.hset(`user-risk:${userId}`, 'riskScore', riskScore.toString());
-    pipeline.hset(`user-risk:${userId}`, 'lastUpdated', Date.now().toString());
-
-    await pipeline.exec();
+    
+    await this.updateUserRiskMetrics({
+      userId,
+      newRiskScore: riskScore,
+      largestTrade: trade.amountUsd,
+      lastUpdated: Date.now()
+    });
   }
 
   async getHighRiskUsers(): Promise<UserRiskProfile[]> {

@@ -31,6 +31,20 @@ Lucent Services implements a sophisticated **Functional Core, Imperative Shell**
 - **A/B testing**: Enable/disable strategies dynamically
 - **Resource optimization**: Match function requirements to available capacity
 
+### 4. CQRS Pattern Integration
+- **Command handlers**: Synchronous writes with immediate validation
+- **Query handlers**: Fast reads from Redis projections
+- **Saga handlers**: Long-running workflows with compensation
+- **Event processing**: Asynchronous projections and notifications
+- **Clear separation**: Commands (writes) vs Queries (reads) vs Events (async)
+
+### 5. I/O Event Scheduling
+- **Time-based scheduling**: Cron-like scheduled I/O operations
+- **Event-triggered scheduling**: I/O operations triggered by domain events
+- **Conditional scheduling**: Execute I/O when specific conditions are met
+- **External event waiting**: Wait for blockchain confirmations or API responses
+- **Fallback handling**: Graceful timeout and error recovery for I/O operations
+
 ## Architecture Layers
 
 ```
@@ -41,40 +55,58 @@ Lucent Services implements a sophisticated **Functional Core, Imperative Shell**
                       │ 
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Imperative Shell (OOP Base Classes)           │
-│  - Function Managers (extend LucentServiceBase)            │
-│  - Event Handlers                                          │
-│  - I/O Operations                                          │ 
-│  - Infrastructure Integration                               │
+│                    CQRS Layer                               │
+│  Commands (Sync) │ Queries (Fast) │ Sagas (Long-Running)   │
+│  - Validation    │ - Redis Cache  │ - Multi-Step Workflows │
+│  - Immediate     │ - Sub-ms reads │ - Compensation Logic   │
+│    Response      │               │ - State Persistence     │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Imperative Shell (OOP Service Classes)        │
+│  - Service Classes (extend CryptoTradingServiceBase)       │
+│  - I/O Operations (EventStore, Redis, APIs)               │
+│  - Command/Query Dispatchers                               │
+│  - I/O Event Scheduling (time, condition, external)       │
+│  - Function Manager Communication                          │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│            Function Manager (Dynamic Orchestration)        │
+│  - Event Processing    - Load Balancing    - Sharding     │
+│  - Function Selection  - Result Handling   - Projections  │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                Functional Core (Pure Functions)            │
-│  - Business Logic Calculations                             │
-│  - Strategy Algorithms                                     │
-│  - Risk Assessments                                        │
-│  - Data Transformations                                    │ 
-│  NO SIDE EFFECTS - FULLY TESTABLE                          │
+│  - Command Handlers  - Query Handlers   - Saga Steps      │
+│  - Business Logic    - Calculations     - Validations     │
+│  - Risk Assessments  - Strategies       - Projections     │ 
+│  NO SIDE EFFECTS - FULLY TESTABLE - DYNAMICALLY ROUTED    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Event Flow Architecture
 
-### 1. Incoming Event Processing
+### 1. Service to Function Manager Flow
 ```
-External Event → Function Manager → Function Registry → Pure Function → Result Event
-                      ↓                    ↓                ↓              ↓
-              Business Context    Load Balancer    Enhanced Context   Event Store
+HTTP Request → Service Class → EventStore/APIs → Function Manager → Pure Function → Result
+     ↓              ↓              ↓                  ↓              ↓           ↓
+I/O Layer    Business Context   Data Gathering   Load Balancing   Computation  EventStore + Redis
 ```
 
-### 2. Cross-Shard Communication
+### 2. Cross-Shard Function Distribution
 ```
-Node A (Aave Functions) ←→ Event Router ←→ Node B (Arbitrage Functions)
-         ↓                       ↓                    ↓
-    Pure Functions          Load Balancer      Pure Functions
-         ↓                       ↓                    ↓
-    Business Events         Health Monitor     Business Events
+Service A → Function Manager Shard 1 → Pure Functions (Aave, Yield Farming)
+Service B → Function Manager Shard 2 → Pure Functions (Arbitrage, Risk)
+Service C → Function Manager Shard 3 → Pure Functions (Analytics, Reporting)
+            ↓                           ↓
+       Load Balancer              Function Registry
+            ↓                           ↓  
+      Health Monitor             Type-Safe Execution
 ```
 
 ### 3. Dynamic Function Distribution

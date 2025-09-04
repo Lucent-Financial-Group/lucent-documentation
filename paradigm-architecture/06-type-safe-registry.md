@@ -202,34 +202,44 @@ export class TypeSafeRegistryGenerator {
 }
 ```
 
-### 3. Runtime Type Validation
+### 3. Runtime Type Validation (Built into Function Manager)
+
 ```typescript
 /**
- * Runtime validation that preserves compile-time type information
+ * Function Manager includes type validation (not separate validator class)
  */
-export class TypeSafeValidator {
+export class FunctionManager extends LucentServiceBase {
   
   /**
-   * Validate event data matches function input type
+   * Validate event data before function execution
    */
-  validateEventData<K extends keyof EventToFunctionMapping>(
+  private validateEventData<K extends keyof EventToFunctionMapping>(
     eventType: K,
-    eventData: unknown
+    eventData: unknown,
+    func: FunctionRegistryEntry
   ): EventToFunctionMapping[K]['input'] {
     
-    const validator = this.getValidatorForEvent(eventType);
-    
-    if (!validator.isValid(eventData)) {
-      throw new ValidationError(
-        `Event data validation failed for ${eventType}`,
-        'event_data',
-        eventData,
-        { 
-          expectedType: validator.expectedType,
-          actualType: typeof eventData,
-          validationErrors: validator.getErrors(eventData)
-        }
-      );
+    // Basic type validation
+    if (eventData === null || eventData === undefined) {
+      throw new ValidationError(`Event data cannot be null for ${eventType}`, 'event_data', eventData);
+    }
+
+    // Validate based on function requirements
+    if (typeof eventData !== 'object') {
+      throw new ValidationError(`Event data must be object for ${eventType}`, 'event_data', eventData);
+    }
+
+    // Function-specific validation (if function declares validators)
+    if (func.validation) {
+      const validationResult = func.validation.validate(eventData);
+      if (!validationResult.isValid) {
+        throw new ValidationError(
+          `Function ${func.name} validation failed`,
+          'function_validation',
+          eventData,
+          { violations: validationResult.violations }
+        );
+      }
     }
     
     return eventData as EventToFunctionMapping[K]['input'];
